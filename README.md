@@ -101,5 +101,15 @@ We don't just hide data in administrative spreadsheets. SwachhOS translates raw 
 
 <div align="center">
   <h2>Try SwachhOS</h2>
+  
+  <a href="https://swachhos-public.web.app" target="_blank">
+    <img src="https://img.shields.io/badge/Public_Dashboard-Live-0ea5e9?style=for-the-badge&logo=firebase" alt="Public Dashboard" />
+  </a>
+  &nbsp;&nbsp;
+  <a href="https://swachhos-admin.web.app" target="_blank">
+    <img src="https://img.shields.io/badge/Admin_Panel-Live-4f46e5?style=for-the-badge&logo=firebase" alt="Admin Panel" />
+  </a>
+  <br /><br />
+  
   <img src="assets/slide7_try_it.png" alt="Try SwachhOS" width="300" />
 </div>
