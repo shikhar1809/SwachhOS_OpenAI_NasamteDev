@@ -5,11 +5,14 @@ import { latLngToCell, cellToBoundary, polygonToCells } from "h3-js";
 
 // ── Lucknow bounding polygon ([lng, lat] pairs for h3-js) ─────────────────────
 const LUCKNOW_POLYGON = [
-  [80.78, 26.70],
-  [80.78, 26.99],
-  [81.12, 26.99],
-  [81.12, 26.70],
-  [80.78, 26.70],
+  [80.80, 26.75], // SW
+  [80.76, 26.87], // Kakori bulge
+  [80.90, 26.93], // Top-Mid (Cuts off NW)
+  [81.08, 26.98], // NE (Added bulge for green area)
+  [81.18, 26.89], // East bulge
+  [81.05, 26.88], // Cut sharply back in
+  [81.08, 26.75], // SE
+  [80.80, 26.75], // Close
 ];
 
 // Resolution 6 → ~36 km² per hex — large district-level zones across the city

@@ -1,8 +1,8 @@
 import { useMemo } from "react";
-import { CheckCircle2, PlusCircle, XCircle, Clock, Activity, TrendingUp } from "lucide-react";
+import { CheckCircle2, PlusCircle, XCircle, Clock, Activity } from "lucide-react";
 import {
   PieChart, Pie, Cell, ResponsiveContainer, Tooltip as RCTooltip, Legend,
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, LineChart, Line, Area, AreaChart,
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Area, AreaChart,
 } from "recharts";
 
 const NOW = new Date("2026-07-06T14:30:00+05:30");
@@ -234,7 +234,7 @@ export default function AnalysisTab({ dumpPoints, reports }) {
           </span>
         </div>
         <div className="flex-1 overflow-y-auto">
-          {reports.map(r => <ReportRow key={r.id} r={r} />)}
+          {[...reports].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)).map(r => <ReportRow key={r.id} r={r} />)}
         </div>
       </div>
     </div>

@@ -1,11 +1,8 @@
-import { useState, useMemo, useEffect } from "react";
-import TopBar from "./components/TopBar";
-import TabBar from "./components/TabBar";
-import MapTab from "./components/tabs/MapTab";
-import AnalysisTab from "./components/tabs/AnalysisTab";
-import InsightsTab from "./components/tabs/InsightsTab";
-import CoordinationTab from "./components/tabs/CoordinationTab";
-import FeedbackTab from "./components/tabs/FeedbackTab";
+import { useState, useMemo, useEffect, useCallback } from "react";
+import { BrowserRouter as Router, Routes, Route } from "react-router-dom";
+import SplashScreen from "./components/SplashScreen";
+import AdminPanel from "./pages/AdminPanel";
+import PublicDashboard from "./pages/PublicDashboard";
 import { DUMP_POINTS as MOCK_POINTS, RAW_REPORTS as MOCK_REPORTS, TEAMS as INITIAL_TEAMS } from "./data/mockData";
 import { db } from "./services/firebase";
 import { collection, onSnapshot } from "firebase/firestore";
@@ -13,6 +10,7 @@ import { collection, onSnapshot } from "firebase/firestore";
 const TODAY = new Date("2026-07-06T00:00:00+05:30");
 
 export default function App() {
+  const [showSplash, setShowSplash] = useState(true);
   const [activeTab, setActiveTab] = useState("rawfeed");
   
   // Real-time Data States
@@ -27,6 +25,11 @@ export default function App() {
   const [teams, setTeams] = useState(INITIAL_TEAMS);
   const [teamAssignments, setTeamAssignments] = useState({});
 
+  // Feedback & Resolve State
+  const [feedbacks, setFeedbacks] = useState([]);
+  // resolving: Set of pointIds currently being processed (shows spinner)
+  const [resolvingIds, setResolvingIds] = useState(new Set());
+
   // Subscribe to Firebase if configured
   useEffect(() => {
     if (!db) return; // Fallback to mock data if Firebase isn't set up
@@ -35,19 +38,70 @@ export default function App() {
     
     const unsubPoints = onSnapshot(collection(db, "dumpPoints"), (snapshot) => {
       const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      if(data.length > 0) setPoints(data);
+      setPoints([...MOCK_POINTS, ...data]);
     });
 
     const unsubReports = onSnapshot(collection(db, "reports"), (snapshot) => {
       const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      if(data.length > 0) setReports(data);
+      setReports([...MOCK_REPORTS, ...data]);
+    });
+
+    const unsubFeedback = onSnapshot(collection(db, "feedback"), (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setFeedbacks(data);
     });
 
     return () => {
       unsubPoints();
       unsubReports();
+      unsubFeedback();
     };
   }, []);
+
+  // ── Resolve Handler ────────────────────────────────────────────────────────
+  const handleResolve = useCallback((pointId) => {
+    const point = points.find(p => p.id === pointId);
+    if (!point || point.status !== "active") return;
+
+    // 1. Add to resolving set (disables button, shows spinner)
+    setResolvingIds(prev => new Set([...prev, pointId]));
+
+    // 2. Mark as resolved immediately
+    const resolvedDate = new Date().toISOString().split('T')[0];
+    setPoints(prev => prev.map(p =>
+      p.id === pointId ? { ...p, status: "resolved", resolved_at: resolvedDate } : p
+    ));
+
+    // Find all phone numbers associated with this point
+    const relatedReports = reports.filter(r => r.matched_point_id === pointId);
+    const phoneNumbers = [...new Set(relatedReports.map(r => r.phone_number).filter(Boolean))];
+    
+    // Fallback for demo purposes if no real numbers exist (but try not to use the sandbox number as To)
+    const targetNumbers = phoneNumbers.length > 0 ? phoneNumbers : [];
+
+    // Trigger the real WhatsApp webhook if there are phone numbers
+    if (targetNumbers.length > 0) {
+      fetch("https://sendfeedbacksurvey-5hbpammmqa-uc.a.run.app", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          pointId,
+          reportId: point.report_id,
+          pointName: point.name,
+          phoneNumbers: targetNumbers
+        })
+      }).catch(err => console.error("Webhook trigger failed:", err));
+    }
+
+    // 3. Remove from resolving set after 1 second (gives UI time to show spinner)
+    setTimeout(() => {
+      setResolvingIds(prev => {
+        const next = new Set(prev);
+        next.delete(pointId);
+        return next;
+      });
+    }, 1000);
+  }, [points]);
 
   // 1. Filter the data
   const { filteredPoints, filteredReports } = useMemo(() => {
@@ -101,41 +155,73 @@ export default function App() {
   }, [filteredPoints, filteredReports]);
 
 
-  return (
-    <div className="flex flex-col h-screen overflow-hidden bg-[#f5f6f8]">
-      <TopBar 
-        activePoints={dynamicStats.activePoints} 
-        newToday={dynamicStats.newToday}
-        timeFilter={timeFilter}
-        setTimeFilter={setTimeFilter}
-        severityFilter={severityFilter}
-        setSeverityFilter={setSeverityFilter}
-      />
-      <TabBar activeTab={activeTab} onTabChange={setActiveTab} />
+  const hostname = window.location.hostname;
+  const isPublicDomain = hostname.includes('swachhos-public');
+  const isAdminDomain = hostname.includes('swachhos-admin');
 
-      <main className="flex flex-1 overflow-hidden">
-        {activeTab === "rawfeed" && (
-          <MapTab dumpPoints={filteredPoints} />
-        )}
-        {activeTab === "analysis" && (
-          <AnalysisTab dumpPoints={filteredPoints} reports={filteredReports} />
-        )}
-        {activeTab === "coordination" && (
-          <CoordinationTab 
-            dumpPoints={filteredPoints} 
-            teamAssignments={teamAssignments} 
-            setTeamAssignments={setTeamAssignments} 
-            teams={teams}
-            setTeams={setTeams}
-          />
-        )}
-        {activeTab === "insights" && (
-          <InsightsTab dumpPoints={filteredPoints} stats={dynamicStats} />
-        )}
-        {activeTab === "feedback" && (
-          <FeedbackTab />
-        )}
-      </main>
-    </div>
+  const publicElement = (
+    <PublicDashboard 
+      points={filteredPoints} 
+      reports={filteredReports} 
+      stats={dynamicStats}
+      timeFilter={timeFilter}
+      setTimeFilter={setTimeFilter}
+      severityFilter={severityFilter}
+      setSeverityFilter={setSeverityFilter}
+    />
+  );
+
+  const adminElement = (
+    <AdminPanel 
+      dynamicStats={dynamicStats}
+      timeFilter={timeFilter}
+      setTimeFilter={setTimeFilter}
+      severityFilter={severityFilter}
+      setSeverityFilter={setSeverityFilter}
+      activeTab={activeTab}
+      setActiveTab={setActiveTab}
+      filteredPoints={filteredPoints}
+      filteredReports={filteredReports}
+      teamAssignments={teamAssignments}
+      setTeamAssignments={setTeamAssignments}
+      teams={teams}
+      setTeams={setTeams}
+      onResolve={handleResolve}
+      resolvingIds={resolvingIds}
+      feedbacks={feedbacks}
+    />
+  );
+
+  if (isPublicDomain) {
+    return (
+      <Router>
+        {showSplash && <SplashScreen onComplete={() => setShowSplash(false)} />}
+        <Routes>
+          <Route path="/*" element={publicElement} />
+        </Routes>
+      </Router>
+    );
+  }
+
+  if (isAdminDomain) {
+    return (
+      <Router>
+        {showSplash && <SplashScreen onComplete={() => setShowSplash(false)} />}
+        <Routes>
+          <Route path="/*" element={adminElement} />
+        </Routes>
+      </Router>
+    );
+  }
+
+  // Default behavior for localhost or unspecified domains
+  return (
+    <Router>
+      {showSplash && <SplashScreen onComplete={() => setShowSplash(false)} />}
+      <Routes>
+        <Route path="/" element={publicElement} />
+        <Route path="/admin" element={adminElement} />
+      </Routes>
+    </Router>
   );
 }

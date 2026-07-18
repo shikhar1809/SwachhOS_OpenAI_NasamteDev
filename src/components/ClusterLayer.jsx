@@ -3,21 +3,24 @@ import { useMap, Marker, Tooltip } from "react-leaflet";
 import L from "leaflet";
 import useSupercluster from "use-supercluster";
 
-function pinColor(count) {
-  if (count >= 7) return "#ef4444";
-  if (count >= 3) return "#f97316";
-  return "#22c55e";
+// Accepts the full point object so we can check status
+function pinColor(point) {
+  if (point.status === "unmanaged") return "#a855f7"; // purple
+  if (point.report_count >= 7) return "#ef4444";      // red
+  if (point.report_count >= 3) return "#f97316";      // orange
+  return "#22c55e";                                   // green
 }
 
 // ─── Minimal Pill Cluster ──────────────────────────────────────────────────────
 // A clean, highly readable pill shape inspired by Airbnb/Modern maps.
 // Shows a glowing dot for dominant severity + the total count.
 function createMinimalPillCluster(clusterCount, properties) {
-  const { red = 0, org = 0, grn = 0 } = properties;
-  
-  // Determine dominant severity color
-  let dominantColor = "#22c55e"; // Green default
-  if (red > 0 && red >= org && red >= grn) dominantColor = "#ef4444";
+  const { red = 0, org = 0, grn = 0, prp = 0 } = properties;
+
+  // Determine dominant severity color (unmanaged purple takes priority)
+  let dominantColor = "#22c55e";
+  if (prp > 0) dominantColor = "#a855f7";
+  else if (red > 0 && red >= org && red >= grn) dominantColor = "#ef4444";
   else if (org > 0 && org >= grn) dominantColor = "#f97316";
 
   const text = clusterCount >= 1000 ? (clusterCount / 1000).toFixed(1) + 'k' : clusterCount;
@@ -65,14 +68,19 @@ function createMinimalPillCluster(clusterCount, properties) {
   });
 }
 
-function createSingleIcon(reportCount) {
-  const color = pinColor(reportCount);
-  const html = `
-    <div class="swachh-marker" style="--marker-color: ${color}; pointer-events: none;">
-      <div class="swachh-marker-pulse" style="pointer-events: none;"></div>
-      <div class="swachh-marker-core" style="transform: scale(1.1); pointer-events: none;"></div>
-    </div>
-  `;
+function createSingleIcon(point) {
+  const color = pinColor(point);
+  const isUnmanaged = point.status === "unmanaged";
+  const html = isUnmanaged
+    ? `<div class="swachh-marker" style="--marker-color: ${color}; pointer-events: none;">
+        <div style="width:22px;height:22px;border-radius:50%;background:${color}22;border:2.5px solid ${color};display:flex;align-items:center;justify-content:center;pointer-events:none;">
+          <div style="width:10px;height:10px;border-radius:50%;background:${color};"></div>
+        </div>
+       </div>`
+    : `<div class="swachh-marker" style="--marker-color: ${color}; pointer-events: none;">
+        <div class="swachh-marker-pulse" style="pointer-events: none;"></div>
+        <div class="swachh-marker-core" style="transform: scale(1.1); pointer-events: none;"></div>
+       </div>`;
   return L.divIcon({ html, className: "custom-div-icon", iconSize: [24, 24], iconAnchor: [12, 12] });
 }
 
@@ -101,11 +109,12 @@ export default function ClusterLayer({ dumpPoints, onPointClick }) {
 
   const points = dumpPoints.map(pt => ({
     type: "Feature",
-    properties: { 
-      cluster: false, 
-      ptId: pt.id, 
-      point: pt, 
-      report_count: pt.report_count 
+    properties: {
+      cluster: false,
+      ptId: pt.id,
+      point: pt,
+      report_count: pt.report_count,
+      status: pt.status,
     },
     geometry: { type: "Point", coordinates: [pt.lng, pt.lat] }
   }));
@@ -118,14 +127,16 @@ export default function ClusterLayer({ dumpPoints, onPointClick }) {
       radius: 75, 
       maxZoom: 18,
       map: (props) => ({
-        red: props.report_count >= 7 ? 1 : 0,
-        org: props.report_count >= 3 && props.report_count < 7 ? 1 : 0,
-        grn: props.report_count < 3 ? 1 : 0
+        red: props.report_count >= 7 && props.status !== "unmanaged" ? 1 : 0,
+        org: props.report_count >= 3 && props.report_count < 7 && props.status !== "unmanaged" ? 1 : 0,
+        grn: props.report_count < 3 && props.status !== "unmanaged" ? 1 : 0,
+        prp: props.status === "unmanaged" ? 1 : 0,
       }),
       reduce: (acc, props) => {
         acc.red += props.red;
         acc.org += props.org;
         acc.grn += props.grn;
+        acc.prp += props.prp;
       }
     }
   });
@@ -152,13 +163,12 @@ export default function ClusterLayer({ dumpPoints, onPointClick }) {
           );
         }
 
-        // Single Point
         const pt = cluster.properties.point;
         return (
           <Marker
             key={pt.id}
             position={[latitude, longitude]}
-            icon={createSingleIcon(pt.report_count)}
+            icon={createSingleIcon(pt)}
             eventHandlers={{ click: () => onPointClick(pt) }}
           >
             <Tooltip direction="top" offset={[0, -4]} className="swachh-tooltip">

@@ -1,21 +1,67 @@
 import { useState, useMemo } from "react";
 import { MapContainer, TileLayer, Polygon } from "react-leaflet";
 import { latLngBounds } from "leaflet";
-import { cellToBoundary, latLngToCell } from "h3-js";
-import { Plus, Users, Trash2, X, Settings2 } from "lucide-react";
+import { cellToBoundary, latLngToCell, polygonToCells } from "h3-js";
+import { Plus, Users, Trash2, X, Settings2, CheckCircle2, Loader2, Search, ChevronLeft, AlertTriangle } from "lucide-react";
 
-// H3 Resolution (8 = approx 0.7km radius)
-const H3_RESOLUTION = 8;
+// H3 Resolution (6 = large district-level zones)
+const H3_RESOLUTION = 6;
 
-export default function CoordinationTab({ dumpPoints, teamAssignments, setTeamAssignments, teams, setTeams }) {
+const LUCKNOW_POLYGON = [
+  [80.80, 26.75],
+  [80.76, 26.87],
+  [80.90, 26.93],
+  [81.08, 26.98],
+  [81.18, 26.89],
+  [81.05, 26.88],
+  [81.08, 26.75],
+  [80.80, 26.75],
+];
+
+function workloadStyle(points, team, isSelected) {
+  const totalReports = points.reduce((sum, pt) => sum + pt.report_count, 0);
+  if (team?.id && team.id !== "unassigned") {
+    return {
+      fillColor: team.color,
+      fillOpacity: isSelected ? 0.62 : 0.42,
+      color: isSelected ? "#111827" : team.color,
+      weight: isSelected ? 3 : 1.2,
+    };
+  }
+  if (totalReports >= 45 || points.length >= 5) {
+    return { fillColor: "#ef4444", fillOpacity: isSelected ? 0.58 : 0.34, color: isSelected ? "#111827" : "#b91c1c", weight: isSelected ? 3 : 1.2 };
+  }
+  if (totalReports >= 15 || points.length >= 2) {
+    return { fillColor: "#f97316", fillOpacity: isSelected ? 0.55 : 0.30, color: isSelected ? "#111827" : "#c2410c", weight: isSelected ? 3 : 1.2 };
+  }
+  if (totalReports > 0) {
+    return { fillColor: "#22c55e", fillOpacity: isSelected ? 0.50 : 0.24, color: isSelected ? "#111827" : "#15803d", weight: isSelected ? 3 : 1.1 };
+  }
+  return { fillColor: "#e5e7eb", fillOpacity: isSelected ? 0.42 : 0.18, color: isSelected ? "#111827" : "#9ca3af", weight: isSelected ? 3 : 0.8 };
+}
+
+function severityBadge(count) {
+  if (count >= 20) return { label: "Critical", cls: "bg-red-100 text-red-700 border-red-200" };
+  if (count >= 10) return { label: "High",     cls: "bg-orange-100 text-orange-700 border-orange-200" };
+  if (count >= 5)  return { label: "Medium",   cls: "bg-yellow-100 text-yellow-700 border-yellow-200" };
+  return               { label: "Low",      cls: "bg-green-100 text-green-700 border-green-200" };
+}
+
+export default function CoordinationTab({
+  dumpPoints,
+  teamAssignments, setTeamAssignments,
+  teams, setTeams,
+  onResolve, resolvingIds, feedbackData,
+}) {
   const [selectedHex, setSelectedHex] = useState(null);
   const [isManagerOpen, setIsManagerOpen] = useState(false);
   const [newTeamName, setNewTeamName] = useState("");
+  const [search, setSearch] = useState("");
+  // confirmingId: point currently showing "confirm resolve?" inline
+  const [confirmingId, setConfirmingId] = useState(null);
 
   const deleteTeam = (teamId) => {
-    // 1. Remove from teams list
     setTeams(prev => prev.filter(t => t.id !== teamId));
-    // 2. Unassign any hexes currently assigned to this team
     setTeamAssignments(prev => {
       const next = { ...prev };
       for (const hex in next) {
@@ -23,24 +69,24 @@ export default function CoordinationTab({ dumpPoints, teamAssignments, setTeamAs
       }
       return next;
     });
-    // 3. Deselect hex if it was assigned to this team? No, just let it show unassigned.
   };
 
   const updateTeamName = (teamId, newName) => {
     setTeams(prev => prev.map(t => t.id === teamId ? { ...t, name: newName } : t));
   };
 
-  // Group dump points by H3 Hex Index
+  // Build H3 hex grid
   const hexData = useMemo(() => {
     const data = {};
+    const h3Indexes = polygonToCells(LUCKNOW_POLYGON, H3_RESOLUTION, true);
+    for (const h3Index of h3Indexes) {
+      data[h3Index] = { points: [], polygon: cellToBoundary(h3Index).map(c => [c[0], c[1]]) };
+    }
     for (const pt of dumpPoints) {
       if (pt.status !== "active") continue;
       const h3Index = latLngToCell(pt.lat, pt.lng, H3_RESOLUTION);
       if (!data[h3Index]) {
-        data[h3Index] = {
-          points: [],
-          polygon: cellToBoundary(h3Index).map(c => [c[0], c[1]]), // [lat, lng]
-        };
+        data[h3Index] = { points: [], polygon: cellToBoundary(h3Index).map(c => [c[0], c[1]]) };
       }
       data[h3Index].points.push(pt);
     }
@@ -49,123 +95,258 @@ export default function CoordinationTab({ dumpPoints, teamAssignments, setTeamAs
 
   const hexList = Object.entries(hexData);
 
-  // Determine center of map
   const bounds = useMemo(() => {
-    if (dumpPoints.length === 0) return [[26.8467, 80.9462]];
-    const b = latLngBounds(dumpPoints.map(p => [p.lat, p.lng]));
+    const active = dumpPoints.filter(p => p.status === "active");
+    if (active.length === 0) return [[26.8467, 80.9462]];
+    const b = latLngBounds(active.map(p => [p.lat, p.lng]));
     return b.isValid() ? b : [[26.8467, 80.9462]];
   }, [dumpPoints]);
+
+  // Report list: only active points, filtered by hex + search
+  const activePoints = useMemo(() => {
+    return dumpPoints
+      .filter(p => p.status === "active")
+      .sort((a, b) => b.report_count - a.report_count);
+  }, [dumpPoints]);
+
+  const hexFilteredPoints = useMemo(() => {
+    if (!selectedHex) return activePoints;
+    const hexPointIds = new Set((hexData[selectedHex]?.points || []).map(p => p.id));
+    return activePoints.filter(p => hexPointIds.has(p.id));
+  }, [activePoints, selectedHex, hexData]);
+
+  const displayedPoints = useMemo(() => {
+    if (!search.trim()) return hexFilteredPoints;
+    const q = search.toLowerCase();
+    return hexFilteredPoints.filter(p =>
+      p.name.toLowerCase().includes(q) || p.report_id.toLowerCase().includes(q)
+    );
+  }, [hexFilteredPoints, search]);
 
   const selectedHexInfo = selectedHex ? hexData[selectedHex] : null;
   const currentTeamId = selectedHex ? teamAssignments[selectedHex] || "unassigned" : null;
 
+  const handleResolveClick = (pointId) => {
+    if (confirmingId === pointId) {
+      // Confirmed — trigger resolve
+      setConfirmingId(null);
+      onResolve(pointId);
+    } else {
+      setConfirmingId(pointId);
+    }
+  };
+
   return (
     <div className="flex flex-1 overflow-hidden bg-white">
+
       {/* ── MAP AREA ── */}
       <div className="flex-1 relative z-0">
-        <MapContainer
-          bounds={bounds}
-          className="h-full w-full"
-          zoomControl={false}
-          attributionControl={false}
-        >
-          <TileLayer
-            url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
-          />
-          
+        <MapContainer bounds={bounds} className="h-full w-full" zoomControl={false} attributionControl={false}>
+          <TileLayer url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png" />
           {hexList.map(([h3Index, { polygon, points }]) => {
             const teamId = teamAssignments[h3Index] || "unassigned";
             const team = teams.find(t => t.id === teamId) || teams.find(t => t.id === "unassigned");
             const isSelected = selectedHex === h3Index;
-
+            const style = workloadStyle(points, team, isSelected);
             return (
               <Polygon
                 key={h3Index}
                 positions={polygon}
-                pathOptions={{
-                  fillColor: team.color,
-                  fillOpacity: isSelected ? 0.6 : 0.35,
-                  color: isSelected ? "#000" : team.color,
-                  weight: isSelected ? 3 : 1,
-                }}
-                eventHandlers={{
-                  click: () => setSelectedHex(h3Index),
-                }}
+                pathOptions={style}
+                eventHandlers={{ click: () => setSelectedHex(isSelected ? null : h3Index) }}
               />
             );
           })}
         </MapContainer>
-      </div>
 
-      {/* ── SIDEBAR PANEL ── */}
-      <div className="w-80 bg-white border-l border-gray-200 shadow-xl flex flex-col z-10">
-        <div className="p-5 border-b border-gray-100 bg-gray-50">
-          <h2 className="text-sm font-black text-gray-900 uppercase tracking-wide">Team Dispatcher</h2>
-          <p className="text-xs text-gray-500 mt-1">Assign response units to active zones.</p>
-        </div>
-
-        {selectedHex ? (
-          <div className="p-5 flex flex-col flex-1 overflow-y-auto">
-            <h3 className="text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-4">Zone Selected</h3>
-            
-            <div className="mb-6">
-              <label className="block text-xs font-bold text-gray-700 mb-2">Assigned Team</label>
-              <select
-                className="w-full bg-white border border-gray-300 rounded-lg text-sm px-3 py-2 text-gray-800 font-semibold focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
-                value={currentTeamId}
-                onChange={(e) => {
-                  setTeamAssignments(prev => ({
-                    ...prev,
-                    [selectedHex]: e.target.value
-                  }));
-                }}
-              >
-                {teams.map(t => (
-                  <option key={t.id} value={t.id}>{t.name}</option>
-                ))}
-              </select>
+        {/* Team assignment tooltip over map when hex selected */}
+        {selectedHex && selectedHexInfo && (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-[1000] bg-white rounded-xl shadow-xl border border-gray-200 p-4 w-72">
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-xs font-black text-gray-700 uppercase tracking-wide">Zone Assignment</span>
+              <button onClick={() => setSelectedHex(null)} className="text-gray-400 hover:text-gray-600 p-0.5 rounded"><X size={14} /></button>
             </div>
-
-            <div className="bg-gray-50 rounded-xl p-4 border border-gray-100 mb-4">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-xs font-bold text-gray-700">Active Dump Sites</span>
-                <span className="text-xs font-black text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-full">
-                  {selectedHexInfo.points.length}
-                </span>
-              </div>
-              <div className="space-y-2 mt-3">
-                {selectedHexInfo.points.map(pt => (
-                  <div key={pt.id} className="text-[11px] text-gray-600 truncate flex items-center gap-2">
-                    <div className="w-1.5 h-1.5 rounded-full bg-gray-400 shrink-0"></div>
-                    {pt.name}
-                  </div>
-                ))}
-              </div>
-            </div>
-
-          </div>
-        ) : (
-          <div className="p-8 flex flex-col items-center justify-center flex-1 text-center opacity-50">
-            <div className="w-12 h-12 bg-gray-100 rounded-full flex items-center justify-center mb-3">
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-gray-400">
-                <path d="M12 22s-8-4.5-8-11.8A8 8 0 0 1 12 2a8 8 0 0 1 8 8.2c0 7.3-8 11.8-8 11.8z" />
-                <circle cx="12" cy="10" r="3" />
-              </svg>
-            </div>
-            <p className="text-sm font-semibold text-gray-600">No Zone Selected</p>
-            <p className="text-xs text-gray-400 mt-1">Click any colored hexagon on the map to assign a team.</p>
+            <label className="block text-xs font-semibold text-gray-600 mb-1.5">Assign Team</label>
+            <select
+              className="w-full bg-white border border-gray-300 rounded-lg text-sm px-3 py-2 text-gray-800 font-semibold focus:outline-none focus:ring-2 focus:ring-indigo-500 mb-2"
+              value={currentTeamId}
+              onChange={(e) => setTeamAssignments(prev => ({ ...prev, [selectedHex]: e.target.value }))}
+            >
+              {teams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
+            <p className="text-[10px] text-gray-400 font-medium">
+              {selectedHexInfo.points.length} active report{selectedHexInfo.points.length !== 1 ? "s" : ""} in this zone
+            </p>
           </div>
         )}
 
-        {/* ── MANAGE TEAMS BUTTON ── */}
-        <div className="p-5 border-t border-gray-100 bg-gray-50">
-          <button 
+        {/* Legend */}
+        <div className="absolute bottom-5 left-5 z-[1000] bg-white/95 backdrop-blur rounded-xl shadow-lg border border-gray-100 px-4 py-3 text-xs">
+          <p className="font-semibold text-gray-400 mb-2 uppercase tracking-widest text-[9px]">Unassigned workload</p>
+          <LegendSwatch color="#ef4444" label="Critical" />
+          <LegendSwatch color="#f97316" label="Moderate" />
+          <LegendSwatch color="#22c55e" label="Low" />
+          <LegendSwatch color="#e5e7eb" label="No active reports" />
+        </div>
+
+        {/* Manage Teams button */}
+        <div className="absolute bottom-5 right-5 z-[1000]">
+          <button
             onClick={() => setIsManagerOpen(true)}
-            className="w-full bg-white border border-gray-300 hover:border-indigo-500 hover:text-indigo-600 text-gray-700 font-bold text-sm py-2 px-4 rounded-lg flex items-center justify-center gap-2 transition-all shadow-sm"
+            className="bg-white border border-gray-300 hover:border-indigo-500 hover:text-indigo-600 text-gray-700 font-bold text-xs py-2 px-4 rounded-lg flex items-center gap-2 shadow-lg transition-all"
           >
-            <Settings2 size={16} />
-            <span>Manage Teams</span>
+            <Settings2 size={14} />Manage Teams
           </button>
+        </div>
+      </div>
+
+      {/* ── REPORT LIST SIDEBAR ── */}
+      <div className="w-96 bg-white border-l border-gray-200 shadow-xl flex flex-col z-10">
+
+        {/* Sidebar Header */}
+        <div className="p-4 border-b border-gray-100 bg-gray-50 shrink-0">
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <h2 className="text-sm font-black text-gray-900 uppercase tracking-wide">Active Reports</h2>
+              <p className="text-[10px] text-gray-500 mt-0.5">
+                {selectedHex
+                  ? `${displayedPoints.length} in selected zone`
+                  : `${activePoints.length} total · click a zone to filter`}
+              </p>
+            </div>
+            {selectedHex && (
+              <button
+                onClick={() => setSelectedHex(null)}
+                className="flex items-center gap-1 text-[10px] font-bold text-indigo-600 hover:text-indigo-800 bg-indigo-50 px-2 py-1 rounded-lg"
+              >
+                <ChevronLeft size={12} />All
+              </button>
+            )}
+          </div>
+
+          {/* Search */}
+          <div className="relative">
+            <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+            <input
+              type="text"
+              placeholder="Search name or SWC-ID…"
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              className="w-full pl-8 pr-3 py-2 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-400 bg-white"
+            />
+          </div>
+        </div>
+
+        {/* Report Cards */}
+        <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-2">
+          {displayedPoints.length === 0 && (
+            <div className="flex flex-col items-center justify-center flex-1 text-center p-8 opacity-50">
+              <div className="w-10 h-10 bg-gray-100 rounded-full flex items-center justify-center mb-2">
+                <CheckCircle2 size={20} className="text-gray-400" />
+              </div>
+              <p className="text-sm font-semibold text-gray-500">No active reports</p>
+              <p className="text-xs text-gray-400 mt-1">
+                {selectedHex ? "No active reports in this zone." : "All reports resolved!"}
+              </p>
+            </div>
+          )}
+
+          {displayedPoints.map(pt => {
+            const badge = severityBadge(pt.report_count);
+            const isResolving = resolvingIds.has(pt.id);
+            const isConfirming = confirmingId === pt.id;
+
+            return (
+              <div
+                key={pt.id}
+                className={`bg-white border rounded-xl p-3 shadow-sm transition-all ${
+                  isConfirming ? "border-amber-300 shadow-amber-100 shadow-md" : "border-gray-100 hover:border-gray-200"
+                }`}
+              >
+                {/* Card Header */}
+                <div className="flex items-start justify-between gap-2 mb-2">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-1.5 mb-0.5">
+                      <span className="text-[10px] font-black text-indigo-600 font-mono tracking-wide">{pt.report_id}</span>
+                    </div>
+                    <p className="text-xs font-bold text-gray-800 leading-snug truncate">{pt.name}</p>
+                  </div>
+                  <span className={`text-[9px] font-black uppercase tracking-wide px-2 py-0.5 rounded-full border shrink-0 ${badge.cls}`}>
+                    {badge.label}
+                  </span>
+                </div>
+
+                {/* Stats row */}
+                <div className="flex items-center gap-3 text-[10px] text-gray-500 mb-3">
+                  <span className="font-bold text-gray-700">{pt.report_count} reports</span>
+                  <span>·</span>
+                  <span>Last: {new Date(pt.last_reported).toLocaleDateString("en-IN", { day:"2-digit", month:"short" })}</span>
+                </div>
+
+                {/* Confirm state */}
+                {isConfirming && !isResolving && (
+                  <div className="mb-2 p-2 bg-amber-50 border border-amber-200 rounded-lg">
+                    <p className="text-[10px] font-bold text-amber-800 mb-1.5">
+                      ⚠️ Mark as resolved? Feedback will be sent to all reporters.
+                    </p>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => handleResolveClick(pt.id)}
+                        className="flex-1 bg-green-600 hover:bg-green-700 text-white text-[10px] font-black py-1.5 rounded-lg transition-colors"
+                      >
+                        Yes, Confirm
+                      </button>
+                      <button
+                        onClick={() => setConfirmingId(null)}
+                        className="flex-1 bg-gray-100 hover:bg-gray-200 text-gray-700 text-[10px] font-black py-1.5 rounded-lg transition-colors"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Resolve button / spinner */}
+                {!isConfirming && (
+                  <button
+                    onClick={() => handleResolveClick(pt.id)}
+                    disabled={isResolving}
+                    className={`w-full flex items-center justify-center gap-2 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                      isResolving
+                        ? "bg-gray-100 text-gray-400 cursor-not-allowed"
+                        : "bg-green-600 hover:bg-green-700 text-white shadow-sm shadow-green-200"
+                    }`}
+                  >
+                    {isResolving ? (
+                      <>
+                        <Loader2 size={12} className="animate-spin" />
+                        Collecting feedback…
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle2 size={12} />
+                        Mark Resolved
+                      </>
+                    )}
+                  </button>
+                )}
+
+              </div>
+            );
+          })}
+
+          {/* Unmanaged notice at bottom */}
+          {dumpPoints.filter(p => p.status === "unmanaged").length > 0 && (
+            <div className="mt-1 p-3 bg-purple-50 border border-purple-200 rounded-xl">
+              <div className="flex items-center gap-2 mb-1">
+                <AlertTriangle size={12} className="text-purple-600" />
+                <span className="text-[10px] font-black text-purple-800 uppercase tracking-wide">Unmanaged Alerts</span>
+              </div>
+              <p className="text-[10px] text-purple-700 font-medium">
+                {dumpPoints.filter(p => p.status === "unmanaged").length} site(s) received poor feedback and need re-inspection. Visible as purple pins on the map.
+              </p>
+            </div>
+          )}
         </div>
       </div>
 
@@ -173,86 +354,77 @@ export default function CoordinationTab({ dumpPoints, teamAssignments, setTeamAs
       {isManagerOpen && (
         <div className="absolute inset-0 bg-black/40 z-50 flex items-center justify-center backdrop-blur-sm p-4">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg flex flex-col overflow-hidden max-h-full">
-            
-            {/* Modal Header */}
             <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between bg-gray-50">
               <div className="flex items-center gap-2">
                 <Users className="text-indigo-600" size={20} />
                 <h2 className="text-lg font-black text-gray-900">Manage Teams</h2>
               </div>
-              <button 
-                onClick={() => setIsManagerOpen(false)}
-                className="text-gray-400 hover:text-gray-600 p-1 rounded-full hover:bg-gray-200 transition-colors"
-              >
+              <button onClick={() => setIsManagerOpen(false)} className="text-gray-400 hover:text-gray-600 p-1 rounded-full hover:bg-gray-200 transition-colors">
                 <X size={20} />
               </button>
             </div>
 
-            {/* Modal Body: List of Teams */}
             <div className="p-6 flex-1 overflow-y-auto space-y-3">
               {teams.filter(t => t.id !== "unassigned").map(team => (
                 <div key={team.id} className="flex items-center gap-3 bg-white border border-gray-200 p-3 rounded-xl shadow-sm">
-                  <div className="w-8 h-8 rounded-full shrink-0 flex items-center justify-center" style={{ backgroundColor: team.color + '20' }}>
-                    <div className="w-4 h-4 rounded-full" style={{ backgroundColor: team.color }}></div>
+                  <div className="w-8 h-8 rounded-full shrink-0 flex items-center justify-center" style={{ backgroundColor: team.color + "20" }}>
+                    <div className="w-4 h-4 rounded-full" style={{ backgroundColor: team.color }} />
                   </div>
                   <input
                     type="text"
                     value={team.name}
-                    onChange={(e) => updateTeamName(team.id, e.target.value)}
-                    className="flex-1 bg-transparent border-none text-sm font-bold text-gray-800 focus:outline-none focus:ring-0 px-1"
+                    onChange={e => updateTeamName(team.id, e.target.value)}
+                    className="flex-1 bg-transparent border-none text-sm font-bold text-gray-800 focus:outline-none px-1"
                   />
-                  <button 
-                    onClick={() => deleteTeam(team.id)}
-                    className="text-gray-400 hover:text-red-600 hover:bg-red-50 p-2 rounded-lg transition-colors shrink-0"
-                    title="Delete Team"
-                  >
+                  <button onClick={() => deleteTeam(team.id)} className="text-gray-400 hover:text-red-600 hover:bg-red-50 p-2 rounded-lg transition-colors shrink-0">
                     <Trash2 size={16} />
                   </button>
                 </div>
               ))}
             </div>
 
-            {/* Modal Footer: Add New Team */}
             <div className="p-6 border-t border-gray-100 bg-gray-50">
-              <form 
+              <form
                 className="flex gap-2"
-                onSubmit={(e) => {
+                onSubmit={e => {
                   e.preventDefault();
                   if (!newTeamName.trim()) return;
                   const colors = ["#8b5cf6", "#d946ef", "#f43f5e", "#0ea5e9", "#14b8a6", "#84cc16"];
-                  const newTeam = {
-                    id: "team_" + Date.now(),
-                    name: newTeamName,
-                    color: colors[(teams.length - 1) % colors.length]
-                  };
+                  const newTeam = { id: "team_" + Date.now(), name: newTeamName, color: colors[(teams.length - 1) % colors.length] };
                   const unassigned = teams.find(t => t.id === "unassigned");
                   const others = teams.filter(t => t.id !== "unassigned");
                   setTeams([...others, newTeam, unassigned]);
                   setNewTeamName("");
                 }}
               >
-                <input 
-                  type="text" 
-                  placeholder="Type new team name..." 
+                <input
+                  type="text"
+                  placeholder="New team name…"
                   value={newTeamName}
-                  onChange={(e) => setNewTeamName(e.target.value)}
+                  onChange={e => setNewTeamName(e.target.value)}
                   className="flex-1 bg-white border border-gray-300 rounded-lg text-sm px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-500 font-medium"
                 />
-                <button 
+                <button
                   type="submit"
                   disabled={!newTeamName.trim()}
                   className="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-2.5 rounded-lg disabled:opacity-50 transition-colors font-bold text-sm flex items-center gap-2"
                 >
-                  <Plus size={16} />
-                  Add
+                  <Plus size={16} />Add
                 </button>
               </form>
             </div>
-
           </div>
         </div>
       )}
+    </div>
+  );
+}
 
+function LegendSwatch({ color, label }) {
+  return (
+    <div className="flex items-center gap-2.5 py-0.5">
+      <span className="w-2.5 h-2.5 rounded-sm border border-white shadow-sm" style={{ backgroundColor: color }} />
+      <span className="text-gray-600">{label}</span>
     </div>
   );
 }

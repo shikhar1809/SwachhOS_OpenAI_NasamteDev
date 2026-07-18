@@ -1,5 +1,17 @@
 {
   "projects": {
     "default": "swachhos101"
+  },
+  "targets": {
+    "swachhos101": {
+      "hosting": {
+        "admin": [
+          "swachhos-admin"
+        ],
+        "public": [
+          "swachhos-public"
+        ]
+      }
+    }
   }
 }
